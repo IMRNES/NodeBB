@@ -15,6 +15,12 @@ import * as translator from '../../modules/translator';
 import * as api from '../../modules/api';
 import * as hooks from '../../modules/hooks';
 
+const MOBILE_USER_AGENT_REGEXP = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i;
+// Deliberately unanchored so that existing, lenient input keeps being accepted
+const DATE_REGEXP = /\d{4}-\d{2}-\d{2}/;
+const HOURS_PER_DAY = 24;
+const MS_PER_DAY = 1000 * 60 * 60 * 24;
+const DEFAULT_UNITS = 'hours';
 
 Chart.register(
 	LineController,
@@ -26,107 +32,126 @@ Chart.register(
 	Filler
 );
 
+/** @type {Chart|null} Chart currently rendered on the page */
+let currentChart = null;
 
-let _current = null;
-let isMobile = false;
-
-export function init({ set, dataset }) {
+/**
+ * Renders the analytics line graph of an admin dashboard page and keeps it in
+ * sync with the range selector.
+ *
+ * @param {object} params
+ * @param {string} params.set Analytics data set to request, e.g. `topics`
+ * @param {number[]} [params.dataset] Pre-loaded data points, fetched from the API when omitted
+ * @returns {Promise<Chart>} The rendered chart instance
+ */
+export async function init({ set, dataset }) {
 	const canvas = document.getElementById('analytics-traffic');
 	const canvasCtx = canvas.getContext('2d');
 	const trafficLabels = utils.getHoursArray();
 
-	isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-	if (isMobile) {
+	if (MOBILE_USER_AGENT_REGEXP.test(navigator.userAgent)) {
 		Chart.defaults.plugins.tooltip.enabled = false;
 	}
 
 	handleUpdateControls({ set });
 
 	const t = translator.Translator.create();
-	return new Promise((resolve) => {
-		t.translateKey(`admin/menu:${ajaxify.data.template.name.replace('admin/', '')}`, []).then((key) => {
-			const data = {
-				labels: trafficLabels,
-				datasets: [
-					{
-						label: key,
-						fill: true,
-						tension: 0.25,
-						backgroundColor: 'rgba(151,187,205,0.2)',
-						borderColor: 'rgba(151,187,205,1)',
-						pointBackgroundColor: 'rgba(151,187,205,1)',
-						pointHoverBackgroundColor: 'rgba(151,187,205,1)',
-						pointBorderColor: '#fff',
-						pointHoverBorderColor: 'rgba(151,187,205,1)',
-						data: dataset || [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-					},
-				],
-			};
+	const key = await t.translateKey(`admin/menu:${ajaxify.data.template.name.replace('admin/', '')}`, []);
 
-			canvas.width = $(canvas).parent().width();
+	const data = {
+		labels: trafficLabels,
+		datasets: [
+			{
+				label: key,
+				yAxisID: 'left-y-axis',
+				fill: true,
+				tension: 0.25,
+				backgroundColor: 'rgba(151,187,205,0.2)',
+				borderColor: 'rgba(151,187,205,1)',
+				pointBackgroundColor: 'rgba(151,187,205,1)',
+				pointHoverBackgroundColor: 'rgba(151,187,205,1)',
+				pointBorderColor: '#fff',
+				pointHoverBorderColor: 'rgba(151,187,205,1)',
+				data: dataset || new Array(HOURS_PER_DAY).fill(0),
+			},
+		],
+	};
 
-			data.datasets[0].yAxisID = 'left-y-axis';
+	canvas.width = $(canvas).parent().width();
 
-			_current = new Chart(canvasCtx, {
-				type: 'line',
-				data: data,
-				options: {
-					responsive: true,
-					maintainAspectRatio: false,
-					scales: {
-						'left-y-axis': {
-							type: 'linear',
-							position: 'left',
-							beginAtZero: true,
-							title: {
-								display: false,
-								text: key,
-							},
-						},
-					},
-					plugins: {
-						legend: {
-							display: false,
-							position: 'bottom',
-						},
-					},
-					interaction: {
-						intersect: false,
-						mode: 'index',
+	currentChart = new Chart(canvasCtx, {
+		type: 'line',
+		data: data,
+		options: {
+			responsive: true,
+			maintainAspectRatio: false,
+			scales: {
+				'left-y-axis': {
+					type: 'linear',
+					position: 'left',
+					beginAtZero: true,
+					title: {
+						display: false,
+						text: key,
 					},
 				},
-			});
-
-			if (!dataset) {
-				update(set).then(resolve);
-			} else {
-				resolve(_current);
-			}
-		});
+			},
+			plugins: {
+				legend: {
+					display: false,
+					position: 'bottom',
+				},
+			},
+			interaction: {
+				intersect: false,
+				mode: 'index',
+			},
+		},
 	});
+
+	if (!dataset) {
+		await update(set);
+	}
+
+	return currentChart;
 }
 
+/**
+ * Binds the range selector so that picking a range refreshes the graph.
+ *
+ * @param {object} params
+ * @param {string} params.set Analytics data set the graph displays
+ */
 function handleUpdateControls({ set }) {
 	$('[data-action="updateGraph"]').on('change', function () {
-		let amount = $(this).val();
+		const $select = $(this);
+		let amount = $select.val();
+
 		if (amount === 'custom') {
-			throwCustomRangeSelector($(this));
+			showCustomRangeSelector($select);
 			return;
 		}
+
 		const units = amount === '1' ? 'hours' : 'days';
-		let until = new Date();
-		if (amount !== '1') {
+		if (amount === '1') { // change 1 day to 24 hours
+			amount = String(HOURS_PER_DAY);
+		}
+
+		const until = new Date();
+		if (units === 'days') {
 			until.setHours(0, 0, 0, 0);
 		}
-		if (amount === '1') { // change 1 day to 24 hours
-			amount = '24';
-		}
-		until = until.getTime();
-		update(set, units, until, amount);
+
+		update(set, units, until.getTime(), amount);
 		$('[data-action="updateGraph"] option[value="range"]').addClass('hidden');
 	});
 
-	function throwCustomRangeSelector(targetEl) {
+	/**
+	 * Opens the custom date range dialog and refreshes the graph once it is submitted.
+	 *
+	 * @param {jQuery} $select Range selector the dialog was opened from
+	 */
+	function showCustomRangeSelector($select) {
 		Benchpress.render('admin/partials/pageviews-range-select', {}).then(async (html) => {
 			const modal = await modals.dialog({
 				title: '[[admin/dashboard:page-views-custom]]',
@@ -139,86 +164,92 @@ function handleUpdateControls({ set }) {
 					},
 				},
 			});
+
 			modal.on('shown.bs.modal', function () {
 				const date = new Date();
 				const today = date.toISOString().slice(0, 10);
 				date.setDate(date.getDate() - 1);
 				const yesterday = date.toISOString().slice(0, 10);
 
-				modal.find('#startRange').val(targetEl.attr('data-startRange') || yesterday);
-				modal.find('#endRange').val(targetEl.attr('data-endRange') || today);
+				modal.find('#startRange').val($select.attr('data-startRange') || yesterday);
+				modal.find('#endRange').val($select.attr('data-endRange') || today);
 			});
 
 			function submit() {
-				// NEED TO ADD VALIDATION HERE FOR YYYY-MM-DD
-				const formData = modal.find('form').serializeObject();
-				const validRegexp = /\d{4}-\d{2}-\d{2}/;
+				const { startRange, endRange } = modal.find('form').serializeObject();
 
-				// Input validation
-				if (!formData.startRange && !formData.endRange) {
+				if (!startRange && !endRange) {
 					// No range? Assume last 30 days
 					update(set, 'days');
 					return;
-				} else if (!validRegexp.test(formData.startRange) || !validRegexp.test(formData.endRange)) {
-					// Invalid Input
+				}
+				if (!DATE_REGEXP.test(startRange) || !DATE_REGEXP.test(endRange)) {
+					// Invalid input, show the error and keep the dialog open
 					modal.find('.alert-danger').removeClass('hidden');
 					return false;
 				}
 
-				let until = new Date(formData.endRange);
+				const until = new Date(endRange);
 				until.setDate(until.getDate() + 1);
-				until = until.getTime();
-				const amount = (until - new Date(formData.startRange).getTime()) / (1000 * 60 * 60 * 24);
+				const untilTimestamp = until.getTime();
+				const amount = (untilTimestamp - new Date(startRange).getTime()) / MS_PER_DAY;
 
-				update(set, 'days', until, amount);
+				update(set, 'days', untilTimestamp, amount);
 
 				// Update "custom range" label
-				targetEl.attr('data-startRange', formData.startRange);
-				targetEl.attr('data-endRange', formData.endRange);
-				targetEl.find('option[value="range"]').text(formData.startRange + ' - ' + formData.endRange);
-				targetEl.val('range');
+				$select.attr('data-startRange', startRange);
+				$select.attr('data-endRange', endRange);
+				$select.find('option[value="range"]').text(`${startRange} - ${endRange}`);
+				$select.val('range');
 			}
 		});
 	}
 }
 
-function update(
+/**
+ * Fetches analytics data and refreshes the chart currently on screen.
+ *
+ * @param {string} set Analytics data set to request, e.g. `topics`
+ * @param {string} [units] Bucket size, either `hours` or `days`
+ * @param {number} [until] End of the range as a timestamp
+ * @param {number} [amount] Number of buckets to fetch
+ * @returns {Promise<Chart>} The updated chart instance
+ */
+async function update(
 	set,
-	units = ajaxify.data.query.units || 'hours',
+	units = ajaxify.data.query.units || DEFAULT_UNITS,
 	until = ajaxify.data.query.until,
 	amount = ajaxify.data.query.count
 ) {
-	if (!_current) {
-		return Promise.reject(new Error('[[error:invalid-data]]'));
+	if (!currentChart) {
+		throw new Error('[[error:invalid-data]]');
 	}
 
-	return new Promise((resolve) => {
-		api.get(`/admin/analytics/${set}`, { units, until, amount }).then((dataset) => {
-			if (units === 'days') {
-				_current.data.xLabels = utils.getDaysArray(until, amount);
-			} else {
-				_current.data.xLabels = utils.getHoursArray();
-			}
+	const dataset = await api.get(`/admin/analytics/${set}`, { units, until, amount });
+	const labels = units === 'days' ? utils.getDaysArray(until, amount) : utils.getHoursArray();
 
-			_current.data.datasets[0].data = dataset;
-			_current.data.labels = _current.data.xLabels;
-			_current.update();
+	// `xLabels` is kept alongside `labels` for consumers of the chart data
+	currentChart.data.xLabels = labels;
+	currentChart.data.labels = labels;
+	currentChart.data.datasets[0].data = dataset;
+	currentChart.update();
 
-			// Update address bar and "View as JSON" button url
-			const apiEl = $('#view-as-json');
-			const newHref = $.param({
-				units: units || 'hours',
-				until: until,
-				count: amount,
-			});
-			apiEl.attr('href', `${config.relative_path}/api/v3/admin/analytics/${ajaxify.data.set}?${newHref}`);
-			const url = ajaxify.removeRelativePath(ajaxify.data.url.slice(1));
-			ajaxify.updateHistory(`${url}?${newHref}`, true);
-			hooks.fire('action:admin.dashboard.updateGraph', {
-				graph: _current,
-			});
-			resolve(_current);
-		});
+	// Update address bar and "View as JSON" button url
+	const query = $.param({
+		units: units || DEFAULT_UNITS,
+		until: until,
+		count: amount,
 	});
-}
+	$('#view-as-json').attr(
+		'href',
+		`${config.relative_path}/api/v3/admin/analytics/${ajaxify.data.set}?${query}`
+	);
 
+	const url = ajaxify.removeRelativePath(ajaxify.data.url.slice(1));
+	ajaxify.updateHistory(`${url}?${query}`, true);
+	hooks.fire('action:admin.dashboard.updateGraph', {
+		graph: currentChart,
+	});
+
+	return currentChart;
+}
