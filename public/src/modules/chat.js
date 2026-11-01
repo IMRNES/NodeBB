@@ -5,6 +5,13 @@ define('chat', [
 ], function (components, taskbar, translator, hooks, modals, alerts, api, scrollStop, resizable, helpers) {
 	const Chat = {};
 
+	/**
+	 * Opens a chat room, either in a modal window or by navigating to the full
+	 * chat page when modals are disabled or the viewport is mobile-sized.
+	 *
+	 * @param {number|string} roomId Chat room to open
+	 * @param {number|string} [uid] User the chat should be opened as, defaults to the current user
+	 */
 	Chat.openChat = function (roomId, uid) {
 		if (!app.user.uid) {
 			return alerts.error('[[error:not-logged-in]]');
@@ -15,6 +22,7 @@ define('chat', [
 			Chat.position(chatModal);
 			Chat.focusInput(chatModal);
 		}
+
 		hooks.fire('filter:chat.openChat', {
 			modal: true,
 			roomId: roomId,
@@ -40,6 +48,13 @@ define('chat', [
 		});
 	};
 
+	/**
+	 * Starts a new chat room with another user, asking for confirmation first if
+	 * that user does not want to be disturbed.
+	 *
+	 * @param {number|string} touid Uid of the user to chat with
+	 * @param {Function} [callback] Called with `(null, roomId)` once the room exists
+	 */
 	Chat.newChat = function (touid, callback) {
 		function createChat() {
 			api.post(`/chats`, {
@@ -56,6 +71,7 @@ define('chat', [
 		}
 
 		callback = callback || function () { };
+
 		if (!app.user.uid) {
 			return alerts.error('[[error:not-logged-in]]');
 		}
@@ -82,6 +98,11 @@ define('chat', [
 		}).catch(alerts.error);
 	};
 
+	/**
+	 * Fetches the most recent chats and renders them into the chat dropdown.
+	 *
+	 * @param {JQuery} chatsListEl Container the dropdown list is rendered into
+	 */
 	Chat.loadChatsDropdown = function (chatsListEl) {
 		api.get('/chats', {
 			uid: app.user.uid,
@@ -107,11 +128,11 @@ define('chat', [
 				const listEl = chatsListEl.get(0);
 
 				const prevFirstRoom = listEl.querySelector('[data-roomid]');
-				const prevFirstRoomKey = prevFirstRoom && `${prevFirstRoom.getAttribute('data-roomid')}:${prevFirstRoom.classList.contains('unread')}`;
+				const prevFirstRoomKey = getRoomKey(prevFirstRoom);
 				chatsListEl.find('*').not('.navigation-link').remove();
 				chatsListEl.prepend(html);
 				const firstRoom = listEl.querySelector('[data-roomid]');
-				const firstRoomKey = firstRoom && `${firstRoom.getAttribute('data-roomid')}:${firstRoom.classList.contains('unread')}`;
+				const firstRoomKey = getRoomKey(firstRoom);
 				if (prevFirstRoomKey && prevFirstRoomKey !== firstRoomKey) {
 					listEl.scrollTop = 0;
 				}
@@ -144,6 +165,22 @@ define('chat', [
 		}).catch(alerts.error);
 	};
 
+	/**
+	 * Builds a comparable key for a rendered chat room element, combining its
+	 * room id with whether it is currently marked unread.
+	 *
+	 * @param {Element} [roomEl] First rendered chat room element, if any
+	 * @returns {string} Key for the element, falsy when the element is absent
+	 */
+	function getRoomKey(roomEl) {
+		return roomEl && `${roomEl.getAttribute('data-roomid')}:${roomEl.classList.contains('unread')}`;
+	}
+
+	/**
+	 * Click handler for the "mark read" control on a chat room entry.
+	 *
+	 * @param {Event} e Click event
+	 */
 	function onMarkReadClicked(e) {
 		const subselector = e.target.closest('.mark-read');
 		if (!subselector) {
@@ -155,6 +192,12 @@ define('chat', [
 		Chat.toggleReadState(chatEl);
 	}
 
+	/**
+	 * Toggles the read/unread state of a chat room, reverting the visual change
+	 * if the request fails.
+	 *
+	 * @param {Element} chatEl Chat room element carrying the `data-roomid` attribute
+	 */
 	Chat.toggleReadState = function (chatEl) {
 		const state = !chatEl.classList.contains('unread'); // this is the new state
 		const roomId = chatEl.getAttribute('data-roomid');
@@ -169,14 +212,32 @@ define('chat', [
 		Chat.markChatElUnread($(chatEl), state);
 	};
 
+	/**
+	 * Checks whether a message was sent by a user the current user has blocked.
+	 *
+	 * @param {number|string} fromUid Uid of the message sender
+	 * @returns {boolean} `true` when the sender is blocked by the current user
+	 */
 	Chat.isFromBlockedUser = function (fromUid) {
 		return app.user?.blocks?.includes(String(fromUid)) ?? false;
 	};
 
+	/**
+	 * Checks whether the current page is the chat page of the given room.
+	 *
+	 * @param {number|string} roomId Room to compare against the room currently being viewed
+	 * @returns {boolean} `true` when the given room is the one on screen
+	 */
 	Chat.isLookingAtRoom = function (roomId) {
 		return ajaxify.data.template.chats && parseInt(ajaxify.data.roomId, 10) === parseInt(roomId, 10);
 	};
 
+	/**
+	 * Toggles the unread indicator of a chat room element.
+	 *
+	 * @param {JQuery} roomEl Chat room element
+	 * @param {boolean} unread Whether the room should be shown as unread
+	 */
 	Chat.markChatElUnread = function (roomEl, unread) {
 		if (roomEl.length > 0) {
 			roomEl.toggleClass('unread', unread);
@@ -188,6 +249,12 @@ define('chat', [
 		}
 	};
 
+	/**
+	 * Handles an incoming chat message, appending it to the room modal when that
+	 * room is currently open.
+	 *
+	 * @param {object} data Socket payload describing the new message
+	 */
 	Chat.onChatMessageReceived = function (data) {
 		if (Chat.isFromBlockedUser(data.fromUid)) {
 			return;
@@ -205,6 +272,12 @@ define('chat', [
 		}
 	};
 
+	/**
+	 * Appends a message to an open room modal, updating the taskbar and unread
+	 * indicators as needed.
+	 *
+	 * @param {object} data Socket payload describing the new message
+	 */
 	function addMessageToModal(data) {
 		const modal = Chat.getModal(data.roomId);
 		const username = data.message.fromUser.username;
@@ -235,6 +308,11 @@ define('chat', [
 		});
 	}
 
+	/**
+	 * Handles a room rename, updating the modal title and taskbar entry.
+	 *
+	 * @param {object} data Socket payload with the new room name
+	 */
 	Chat.onRoomRename = function (data) {
 		const modal = Chat.getModal(data.roomId);
 		const titleEl = modal.find('[component="chat/room/name"]');
@@ -248,6 +326,14 @@ define('chat', [
 		}));
 	};
 
+	/**
+	 * Updates the title of a chat room modal.
+	 *
+	 * @param {JQuery} titleEl Element holding the room name
+	 * @param {string} icon Font Awesome icon shown in front of the name
+	 * @param {string} [newName] New room name, falls back to the "chatting with" message
+	 * @param {string} [chatWithMessage] Translated fallback title
+	 */
 	Chat.updateRoomName = function (titleEl, icon, newName, chatWithMessage) {
 		if (titleEl.length) {
 			titleEl.translateHtml(
@@ -258,6 +344,11 @@ define('chat', [
 		}
 	};
 
+	/**
+	 * Handles a typing notification from another user.
+	 *
+	 * @param {object} data Socket payload with `uid`, `username` and `typing` state
+	 */
 	Chat.onUserTyping = function (data) {
 		if (data.uid === app.user.uid || Chat.isFromBlockedUser(data.uid)) {
 			return;
@@ -268,6 +359,12 @@ define('chat', [
 		}
 	};
 
+	/**
+	 * Renders the list of users currently typing in a room.
+	 *
+	 * @param {JQuery} container Modal or composer containing the typing indicator
+	 * @param {object} data Socket payload with `uid`, `username` and `typing` state
+	 */
 	Chat.updateTypingUserList = async function (container, { uid, username, typing }) {
 		const typingEl = container.find(`[component="chat/composer/typing"]`);
 		const typingUsersList = typingEl.find('[component="chat/composer/typing/users"]');
@@ -301,10 +398,31 @@ define('chat', [
 		typingTextEl.toggleClass('hidden', !usernames.length);
 	};
 
+	/**
+	 * Retrieves the modal element of a chat room.
+	 *
+	 * @param {number|string} roomId Chat room whose modal is requested
+	 * @returns {JQuery} Modal element, empty when the room has no modal
+	 */
 	Chat.getModal = function (roomId) {
-		return $('#chat-modal-' + roomId);
+		return $(`#chat-modal-${roomId}`);
 	};
 
+	/**
+	 * Retrieves a chat modal by its taskbar uuid.
+	 *
+	 * @param {string} uuid Unique id assigned to the modal
+	 * @returns {JQuery} Modal element, empty when no modal has that uuid
+	 */
+	function getModalByUuid(uuid) {
+		return $(`.chat-modal[data-uuid="${uuid}"]`);
+	}
+
+	/**
+	 * Raises a chat modal above the other open chat modals.
+	 *
+	 * @param {JQuery} chatModal Modal to bring to the front
+	 */
 	function bringModalToFront(chatModal) {
 		const chatModals = $('.chat-modal');
 		if (chatModals.length <= 1) {
@@ -315,10 +433,35 @@ define('chat', [
 		chatModal.css('zIndex', zIndex + 1);
 	}
 
+	/**
+	 * Checks whether a chat room modal is currently open.
+	 *
+	 * @param {number|string} roomId Chat room to look for
+	 * @returns {boolean} `true` when the room has an open modal
+	 */
 	Chat.modalExists = function (roomId) {
-		return $('#chat-modal-' + roomId).length !== 0;
+		return Chat.getModal(roomId).length !== 0;
 	};
 
+	/**
+	 * Clears the unread marker of a room modal once the user interacts with it.
+	 *
+	 * @param {JQuery} chatModal Chat room modal
+	 * @param {number|string} roomId Chat room the modal belongs to
+	 */
+	function clearNewMessageOnInteraction(chatModal, roomId) {
+		if (parseInt(chatModal.attr('new-message'), 10) === 1) {
+			api.del(`/chats/${roomId}/state`, {});
+			chatModal.removeAttr('new-message');
+		}
+	}
+
+	/**
+	 * Sets up the chat widget shown in the sidebar of full chat pages.
+	 *
+	 * @param {number|string} roomId Chat room being displayed
+	 * @param {JQuery} chatModal Widget element the handlers are bound to
+	 */
 	Chat.initWidget = function (roomId, chatModal) {
 		require(['forum/chats', 'forum/chats/messages'], function (Chats, ChatsMessages) {
 			socket.emit('modules.chats.enter', roomId);
@@ -333,10 +476,7 @@ define('chat', [
 			scrollStop.apply(chatModal.find('[component="chat/messages"] .chat-content'));
 
 			chatModal.on('mousemove keypress click', function () {
-				if (parseInt(chatModal.attr('new-message'), 10) === 1) {
-					api.del(`/chats/${roomId}/state`, {});
-					chatModal.removeAttr('new-message');
-				}
+				clearNewMessageOnInteraction(chatModal, roomId);
 			});
 
 			Chats.addActionHandlers(chatModal.find('[component="chat/message/window"]'), roomId);
@@ -353,13 +493,7 @@ define('chat', [
 			Chats.addIPHandler(chatModal);
 			Chats.addCopyTextLinkHandler(chatModal);
 			Chats.addTooltipHandler(chatModal);
-			Chats.addUploadHandler({
-				dragDropAreaEl: chatModal.find('.modal-content'),
-				pasteEl: chatModal,
-				uploadFormEl: chatModal.find('[component="chat/upload"]'),
-				uploadBtnEl: chatModal.find('[component="chat/upload/button"]'),
-				inputEl: chatModal.find('[component="chat/input"]'),
-			});
+			Chats.addUploadHandler(getUploadHandlerOptions(chatModal));
 
 			ChatsMessages.addSocketListeners();
 
@@ -369,6 +503,12 @@ define('chat', [
 		});
 	};
 
+	/**
+	 * Creates the modal for a chat room and binds all of its handlers.
+	 *
+	 * @param {object} data Room data used to render the modal
+	 * @param {Function} [callback] Called with the created (or existing) modal element
+	 */
 	Chat.createModal = function (data, callback) {
 		callback = callback || function () {};
 		require([
@@ -377,12 +517,12 @@ define('chat', [
 			app.parseAndTranslate('chat', data, function (chatModal) {
 				const roomId = data.roomId;
 				if (Chat.modalExists(roomId)) {
-					return callback(Chat.getModal(data.roomId));
+					return callback(Chat.getModal(roomId));
 				}
 				const uuid = utils.generateUUID();
 				let dragged = false;
 
-				chatModal.attr('id', 'chat-modal-' + roomId);
+				chatModal.attr('id', `chat-modal-${roomId}`);
 				chatModal.attr('data-roomid', roomId);
 				chatModal.attr('data-uuid', uuid);
 				chatModal.css('position', 'fixed');
@@ -415,8 +555,7 @@ define('chat', [
 				chatModal.find('.modal-header').on('dblclick', gotoChats);
 				chatModal.find('button[data-action="maximize"]').on('click', gotoChats);
 				chatModal.find('button[data-action="minimize"]').on('click', function () {
-					const uuid = chatModal.attr('data-uuid');
-					Chat.minimize(uuid);
+					Chat.minimize(chatModal.attr('data-uuid'));
 				});
 
 				chatModal.on('mousedown', function () {
@@ -438,10 +577,7 @@ define('chat', [
 				});
 
 				chatModal.on('mousemove keypress click', function () {
-					if (parseInt(chatModal.attr('new-message'), 10) === 1) {
-						api.del(`/chats/${roomId}/state`, {});
-						chatModal.removeAttr('new-message');
-					}
+					clearNewMessageOnInteraction(chatModal, roomId);
 				});
 
 				Chats.addActionHandlers(chatModal.find('[component="chat/message/window"]'), roomId);
@@ -462,13 +598,7 @@ define('chat', [
 				Chats.addIPHandler(chatModal);
 				Chats.addCopyTextLinkHandler(chatModal);
 				Chats.addTooltipHandler(chatModal);
-				Chats.addUploadHandler({
-					dragDropAreaEl: chatModal.find('.modal-content'),
-					pasteEl: chatModal,
-					uploadFormEl: chatModal.find('[component="chat/upload"]'),
-					uploadBtnEl: chatModal.find('[component="chat/upload/button"]'),
-					inputEl: chatModal.find('[component="chat/input"]'),
-				});
+				Chats.addUploadHandler(getUploadHandlerOptions(chatModal));
 
 				ChatsMessages.addSocketListeners();
 				messageSearch.init(roomId, chatModal);
@@ -492,6 +622,28 @@ define('chat', [
 		});
 	};
 
+	/**
+	 * Builds the element options shared by every chat upload handler binding.
+	 *
+	 * @param {JQuery} chatModal Chat room modal
+	 * @returns {object} Options for `Chats.addUploadHandler`
+	 */
+	function getUploadHandlerOptions(chatModal) {
+		return {
+			dragDropAreaEl: chatModal.find('.modal-content'),
+			pasteEl: chatModal,
+			uploadFormEl: chatModal.find('[component="chat/upload"]'),
+			uploadBtnEl: chatModal.find('[component="chat/upload/button"]'),
+			inputEl: chatModal.find('[component="chat/input"]'),
+		};
+	}
+
+	/**
+	 * Makes a chat modal resizable and draggable.
+	 *
+	 * @param {JQuery} chatModal Modal to make resizable and draggable
+	 * @param {string} uuid Unique id assigned to the modal
+	 */
 	function makeModalResizeableDraggable(chatModal, uuid) {
 		resizable.init(chatModal.find('.modal-content'), {
 			minWidth: 400,
@@ -523,14 +675,24 @@ define('chat', [
 		});
 	}
 
+	/**
+	 * Focuses the message input of a chat modal.
+	 *
+	 * @param {JQuery} chatModal Chat room modal
+	 */
 	Chat.focusInput = function (chatModal) {
 		setTimeout(function () {
 			chatModal.find('[component="chat/input"]').focus();
 		}, 20);
 	};
 
+	/**
+	 * Closes a chat modal and cleans up the resources bound to it.
+	 *
+	 * @param {string} uuid Unique id of the modal to close
+	 */
 	Chat.close = function (uuid) {
-		const chatModal = $('.chat-modal[data-uuid="' + uuid + '"]');
+		const chatModal = getModalByUuid(uuid);
 		chatModal.find('[data-bs-toggle="tooltip"]').tooltip('dispose');
 		chatModal.remove();
 		chatModal.data('modal', null);
@@ -551,15 +713,28 @@ define('chat', [
 		});
 	};
 
+	/**
+	 * Leaves the socket room unless the user is still viewing it, either on the
+	 * full chat page or through an open modal.
+	 *
+	 * @param {number|string} roomId Chat room to leave
+	 */
 	Chat.leaveSocketRoom = function (roomId) {
 		if (!roomId) return;
-		const isLookingAtRoom = ajaxify.data.template.chats && parseInt(ajaxify.data.roomId, 10) === parseInt(roomId, 10);
+		const isLookingAtRoom = Chat.isLookingAtRoom(roomId);
 		const isModalOpen = Chat.modalExists(roomId);
 		if (isLookingAtRoom !== isModalOpen) {
 			socket.emit('modules.chats.leave', roomId);
 		}
 	};
 
+	/**
+	 * Positions a chat modal at the bottom right (or left, in RTL locales) of the
+	 * viewport, temporarily un-hiding it when needed to measure its size.
+	 *
+	 * @param {JQuery} chatModal Chat room modal
+	 * @returns {JQuery} The positioned modal
+	 */
 	Chat.position = function (chatModal) {
 		let hideAfter = false;
 		if (chatModal.hasClass('hide')) {
@@ -581,9 +756,14 @@ define('chat', [
 		return chatModal;
 	};
 
+	/**
+	 * Loads a minimized or hidden chat modal back into view.
+	 *
+	 * @param {string} uuid Unique id of the modal to load
+	 */
 	Chat.load = function (uuid) {
 		require(['forum/chats/messages'], function (ChatsMessages) {
-			const chatModal = $('.chat-modal[data-uuid="' + uuid + '"]');
+			const chatModal = getModalByUuid(uuid);
 			chatModal.removeClass('hide');
 			bringModalToFront(chatModal);
 			taskbar.updateActive(uuid);
@@ -599,11 +779,17 @@ define('chat', [
 		});
 	};
 
+	/**
+	 * Switches a chat modal to its full-screen mobile layout.
+	 *
+	 * @param {JQuery} modalEl Chat room modal
+	 */
 	Chat.enableMobileBehaviour = function (modalEl) {
 		app.toggleNavbar(false);
 		modalEl.attr('data-mobile', '1');
 		const messagesEl = modalEl.find('.modal-body');
 		messagesEl.css('height', Chat.calculateChatListHeight(modalEl));
+
 		function resize() {
 			messagesEl.css('height', Chat.calculateChatListHeight(modalEl));
 			require(['forum/chats/messages'], function (ChatsMessages) {
@@ -618,17 +804,31 @@ define('chat', [
 		});
 	};
 
+	/**
+	 * Restores the regular navbar after a mobile chat modal is closed.
+	 */
 	Chat.disableMobileBehaviour = function () {
 		app.toggleNavbar(true);
 	};
 
+	/**
+	 * Calculates the height available to the chat message list of a modal.
+	 *
+	 * @param {JQuery} modalEl Chat room modal
+	 * @returns {number} Modal height minus the height of its header
+	 */
 	Chat.calculateChatListHeight = function (modalEl) {
 		// Formula: modal height minus header height. Simple(tm).
 		return modalEl.find('.modal-content').outerHeight() - modalEl.find('.modal-header').outerHeight();
 	};
 
+	/**
+	 * Minimizes a chat modal into the taskbar.
+	 *
+	 * @param {string} uuid Unique id of the modal to minimize
+	 */
 	Chat.minimize = function (uuid) {
-		const chatModal = $('.chat-modal[data-uuid="' + uuid + '"]');
+		const chatModal = getModalByUuid(uuid);
 		chatModal.find('[data-bs-toggle="tooltip"]').tooltip('hide');
 		chatModal.addClass('hide');
 		taskbar.minimize('chat', uuid);
