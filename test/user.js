@@ -548,11 +548,17 @@ describe('User', () => {
 		});
 
 		it('should properly update global post counters after user account deletion with a topic that has replies from other users', async () => {
-			const global = await db.getObject('global');
+			// Counters are stored as strings, so coerce them before comparing
+			async function getGlobalCounters() {
+				const { postCount, topicCount } = await db.getObject('global');
+				return { postCount: Number(postCount), topicCount: Number(topicCount) };
+			}
 
-			const uid1 = await User.create({ username: 'chatuserdelete1' });
-			const uid2 = await User.create({ username: 'chatuserdelete2' });
-			const uid3 = await User.create({ username: 'chatuserdelete3' });
+			const before = await getGlobalCounters();
+
+			const uid1 = await User.create({ username: 'deletecontentposter' });
+			const uid2 = await User.create({ username: 'deletecontentreplier1' });
+			const uid3 = await User.create({ username: 'deletecontentreplier2' });
 			const topic = await Topics.post({
 				uid: uid1,
 				title: 'topic with replies',
@@ -570,16 +576,16 @@ describe('User', () => {
 				tid: topic.topicData.tid,
 				content: 'reply content 2',
 			});
-			const afterPosting = await db.getObject('global');
-			assert.strictEqual(Number(afterPosting.postCount), Number(global.postCount) + 3); // initial post + 2 replies
-			assert.strictEqual(Number(afterPosting.topicCount), Number(global.topicCount) + 1); // just one new topic
+
+			const afterPosting = await getGlobalCounters();
+			assert.strictEqual(afterPosting.postCount, before.postCount + 3, 'initial post + 2 replies');
+			assert.strictEqual(afterPosting.topicCount, before.topicCount + 1, 'just one new topic');
 
 			await User.deleteContent(uid1, uid1);
 
-			const afterUserDelete = await db.getObject('global');
-
-			assert.strictEqual(Number(afterUserDelete.postCount), Number(global.postCount)); // back to original postcount
-			assert.strictEqual(Number(afterUserDelete.topicCount), Number(global.topicCount)); // back to original topic count
+			const afterUserDelete = await getGlobalCounters();
+			assert.strictEqual(afterUserDelete.postCount, before.postCount, 'back to original post count');
+			assert.strictEqual(afterUserDelete.topicCount, before.topicCount, 'back to original topic count');
 		});
 	});
 

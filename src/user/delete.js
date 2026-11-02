@@ -19,11 +19,25 @@ const utils = require('../utils');
 module.exports = function (User) {
 	const deletesInProgress = {};
 
+	/**
+	 * Delete a user's content and then the account itself.
+	 *
+	 * @param {number} callerUid Uid of the user performing the deletion
+	 * @param {number} uid Uid of the user being deleted
+	 * @returns {Promise<object>} The deleted user's data
+	 */
 	User.delete = async (callerUid, uid) => {
 		await User.deleteContent(callerUid, uid);
-		return await User.deleteAccount(uid);
+		return User.deleteAccount(uid);
 	};
 
+	/**
+	 * Delete all content (posts, topics, uploads and queued posts) belonging to a user.
+	 *
+	 * @param {number} callerUid Uid of the user performing the deletion
+	 * @param {number} uid Uid of the user whose content is being deleted
+	 * @returns {Promise<void>}
+	 */
 	User.deleteContent = async function (callerUid, uid) {
 		if (utils.isNumber(uid) && parseInt(uid, 10) <= 0) {
 			throw new Error('[[error:invalid-uid]]');
@@ -32,30 +46,40 @@ module.exports = function (User) {
 			throw new Error('[[error:already-deleting]]');
 		}
 		deletesInProgress[uid] = 'user.delete';
-		async function deletePostsTopics() {
+		async function deletePostsAndTopics() {
 			await deletePosts(callerUid, uid);
 			await deleteTopics(callerUid, uid);
 		}
 		await Promise.all([
-			deletePostsTopics(),
+			deletePostsAndTopics(),
 			deleteUploads(callerUid, uid),
 			deleteQueued(uid),
 		]);
 		delete deletesInProgress[uid];
 	};
 
+	/**
+	 * Purge the given ids in batches, removing each processed batch from `setKey`.
+	 *
+	 * @param {string} setKey Sorted set key containing the ids to purge
+	 * @param {number} batchSize Number of ids processed per batch
+	 * @param {function} purge Purges a single batch of ids
+	 * @returns {Promise<void>}
+	 */
+	async function purgeInBatches(setKey, batchSize, purge) {
+		await batch.processSortedSet(setKey, async (ids) => {
+			await purge(ids);
+			await db.sortedSetRemove(setKey, ids);
+		}, { alwaysStartAt: 0, batch: batchSize });
+	}
+
 	async function deletePosts(callerUid, uid) {
-		await batch.processSortedSet(`uid:${uid}:posts`, async (pids) => {
-			await posts.purge(pids, callerUid);
-			await db.sortedSetRemove(`uid:${uid}:posts`, pids);
-		}, { alwaysStartAt: 0, batch: 500 });
+		await purgeInBatches(`uid:${uid}:posts`, 500, pids => posts.purge(pids, callerUid));
 	}
 
 	async function deleteTopics(callerUid, uid) {
-		await batch.processSortedSet(`uid:${uid}:topics`, async (tids) => {
-			await topics.purgePostsAndTopic(tids, callerUid);
-			await db.sortedSetRemove(`uid:${uid}:topics`, tids);
-		}, { alwaysStartAt: 0, batch: 100 });
+		// `purgePostsAndTopic` also purges other users' replies, so they are not orphaned
+		await purgeInBatches(`uid:${uid}:topics`, 100, tids => topics.purgePostsAndTopic(tids, callerUid));
 	}
 
 	async function deleteUploads(callerUid, uid) {
@@ -95,6 +119,12 @@ module.exports = function (User) {
 		], uid);
 	}
 
+	/**
+	 * Delete a user account and all associated data.
+	 *
+	 * @param {number|string} uid Uid of the user being deleted (remote uid for federated users)
+	 * @returns {Promise<object>} The deleted user's data
+	 */
 	User.deleteAccount = async function (uid) {
 		if (deletesInProgress[uid] === 'user.deleteAccount') {
 			throw new Error('[[error:already-deleting]]');
