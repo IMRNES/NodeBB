@@ -81,30 +81,42 @@ jobs:
       - name: Verify the forum serves
         run: |
           set -euo pipefail
-          # Asserted through Caddy on the public origin, not against NodeBB's own
-          # port: this proves the whole path (TLS, reverse proxy, app) rather than
-          # only that a process is listening.
+          # The deploy script already failed the run if NodeBB is not answering on
+          # loopback, so what is left to prove is the public path: TLS, the reverse
+          # proxy, and the app together.
           #
-          # `--resolve` pins the name to this host because forum.imrnes.team is a
-          # DNS record this workflow does not manage; without pinning, the check
-          # could be answered by whatever that name currently points at.
+          # That path can only be proven once DNS for forum.imrnes.team points at
+          # this host, because Caddy issues the certificate over ACME against the
+          # public name. While the record still points at a decommissioned host the
+          # handshake cannot complete, and asserting it would fail every deploy for
+          # a record this workflow does not own. So: assert when the name is ours,
+          # report when it is not, and never pass silently either way.
+          resolved=$(dig +short forum.imrnes.team @1.1.1.1 | tail -1)
+          echo "forum.imrnes.team resolves to: ${resolved:-nothing}"
+
+          if [ "$resolved" != "$VPS_HOST" ]; then
+            echo "::warning::forum.imrnes.team does not point at $VPS_HOST yet (currently ${resolved:-nothing})"
+            echo "::warning::skipping the public HTTPS check - the origin was verified on loopback by the deploy script"
+            exit 0
+          fi
+
           for path in / /api/config; do
             code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 25 \
-                     --resolve "forum.imrnes.team:443:$VPS_HOST" \
                      "https://forum.imrnes.team$path")
             echo "GET $path -> $code"
             [ "$code" = "200" ] || { echo "::error::$path returned $code"; exit 1; }
           done
 
       - name: Report the DNS state
-        # Reported, never enforced. A public name pointing at a decommissioned
-        # host is a DNS problem, and failing the deploy for it would mean a green
-        # build could never ship until someone else changed a record.
+        # Kept separate so the DNS line is visible even when the check above was
+        # skipped, and so a future reader can see the record is still the old one
+        # without reading a green run as "the forum is publicly reachable".
         run: |
           resolved=$(dig +short forum.imrnes.team @1.1.1.1 | tail -1)
-          echo "forum.imrnes.team resolves to: ${resolved:-nothing}"
-          if [ "$resolved" != "$VPS_HOST" ]; then
-            echo "::warning::forum.imrnes.team does not point at $VPS_HOST yet (currently ${resolved:-nothing}) - the origin serves, the public name does not"
+          if [ "$resolved" = "$VPS_HOST" ]; then
+            echo "forum.imrnes.team points at the origin"
+          else
+            echo "::warning::forum.imrnes.team still resolves to ${resolved:-nothing}, not $VPS_HOST"
           fi
 
       - name: Clean up the key
