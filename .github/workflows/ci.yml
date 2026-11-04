@@ -1,0 +1,116 @@
+name: CI
+
+# The gate for NodeBB. `deploy.yml` calls this file rather than copying its steps,
+# so the check a PR shows and the check a deploy depends on are one definition.
+#
+# NodeBB's own test suite needs a live database and takes many minutes, so this
+# job does what can be verified without one: the tree parses, the generated
+# manifest is valid, and the two plugins this fork depends on still declare the
+# hooks the forum expects. A syntax error or a plugin that dropped a hook is what
+# actually breaks a deploy here, and both are cheap to catch.
+on:
+  pull_request:
+  workflow_call:
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('nodebb-ci-pr-{0}', github.ref) || format('nodebb-ci-call-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    name: Syntax and manifest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      # The repository gitignores /package.json; `install/package.json` is the
+      # template the Dockerfile and the deploy script both copy. Checking it is
+      # therefore checking the manifest the forum actually runs on.
+      - name: The install manifest is valid and matches the running engine
+        run: |
+          set -euo pipefail
+          node -e '
+            const p = require("./install/package.json");
+            if (!p.version) throw new Error("install/package.json has no version");
+            if (!p.engines || !p.engines.node) throw new Error("no node engine declared");
+            if (p.name !== "nodebb") throw new Error(`unexpected package name ${p.name}`);
+            console.log(`nodebb ${p.version}, node ${p.engines.node}`);
+          '
+
+      - name: Every JavaScript file parses
+        # `node --check` is a parse, not a run: it catches the class of defect that
+        # took the forum down (a reference to a binding that no longer exists is a
+        # runtime error, but a broken brace or a stray keyword is caught here).
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r f; do
+            node --check "$f" || { echo "::error file=$f::failed to parse"; fail=1; }
+          done < <(find src install -name '*.js' -not -path '*/node_modules/*' | head -3000)
+          exit $fail
+
+  plugins:
+    name: Plugin contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      # The deploy script clones these two repositories into node_modules. If
+      # either stops declaring the hooks the forum relies on - or changes its id,
+      # which is the key NodeBB stores activation under - the forum would start
+      # with the plugin silently inert. That is the failure this job exists for.
+      - name: Fetch both plugin repositories
+        run: |
+          set -euo pipefail
+          git clone --depth 1 -q https://github.com/MythEclipse/nodebb-plugin-imrnes-ranks.git /tmp/ranks
+          git clone --depth 1 -q https://github.com/MythEclipse/nodebb-plugin-bridge-upload.git /tmp/upload
+
+      - name: They declare the hooks the forum needs
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("fs");
+            const check = (dir, id, required) => {
+              const p = JSON.parse(fs.readFileSync(`${dir}/plugin.json`, "utf8"));
+              if (p.id !== id) throw new Error(`${dir}: id is ${p.id}, expected ${id}`);
+              const hooks = (p.hooks || []).map(h => h.hook);
+              for (const h of required) {
+                if (!hooks.includes(h)) throw new Error(`${dir}: missing hook ${h}`);
+              }
+              console.log(`${id}: ${hooks.length} hooks, all required present`);
+            };
+            check("/tmp/ranks", "nodebb-plugin-imrnes-ranks", [
+              "static:app.load",
+              "filter:posts.modifyUserInfo",
+              "filter:user.getFields",
+            ]);
+            check("/tmp/upload", "nodebb-plugin-bridge-upload", ["static:app.load"]);
+          '
+
+      - name: The upload plugin still exports its library entry point
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("fs");
+            for (const dir of ["/tmp/ranks", "/tmp/upload"]) {
+              const pkg = JSON.parse(fs.readFileSync(`${dir}/package.json`, "utf8"));
+              const main = `${dir}/${pkg.main || "library.js"}`;
+              if (!fs.existsSync(main)) throw new Error(`${dir}: main ${main} is missing`);
+              console.log(`${pkg.name}@${pkg.version} -> ${pkg.main || "library.js"}`);
+            }
+          '

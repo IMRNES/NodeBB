@@ -1,0 +1,112 @@
+name: Build & Deploy
+
+# Deploys NodeBB to forum.imrnes.team after CI is green.
+#
+# Unlike the homepage, nothing is built here: NodeBB's asset build compiles
+# templates and bundles against the *installed plugin set*, so it has to run on
+# the host, next to the plugins. A prebuilt tree shipped from a runner would mean
+# a plugin update could never take effect without rebuilding the whole forum.
+#
+# The host does the work; this workflow's job is to gate it and prove it landed.
+# The key is restricted to a forced command, so a leak cannot open a shell.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: nodebb-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  VPS_HOST: ${{ secrets.VPS_HOST }}
+  VPS_USER: ${{ secrets.VPS_USER }}
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    name: Deploy to imrnes
+    needs: ci
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: nodebb-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Install the deploy key
+        env:
+          KEY_PATH: ${{ runner.temp }}/deploy_key
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+          ssh-keygen -y -f "$KEY_PATH" >/dev/null
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
+
+      - name: Verify the host is reachable and the key is restricted
+        env:
+          DEPLOY_KEY: ${{ runner.temp }}/deploy_key
+        run: |
+          set -euo pipefail
+          ssh -i "$DEPLOY_KEY" -o BatchMode=yes -o ConnectTimeout=20 \
+              "$VPS_USER@$VPS_HOST" "status"
+
+          # Negative control: if the forced command ever lets a shell through, the
+          # key is not restricted and the deploy must not proceed.
+          if ssh -i "$DEPLOY_KEY" -o BatchMode=yes -o ConnectTimeout=20 \
+               "$VPS_USER@$VPS_HOST" "id" 2>/dev/null; then
+            echo "::error::the deploy key obtained a shell - refusing to deploy"
+            exit 1
+          fi
+          echo "key is restricted to the deploy allowlist (shell refused as expected)"
+
+      - name: Deploy
+        env:
+          DEPLOY_KEY: ${{ runner.temp }}/deploy_key
+        run: |
+          set -euo pipefail
+          ssh -i "$DEPLOY_KEY" -o BatchMode=yes -o ConnectTimeout=20 \
+              "$VPS_USER@$VPS_HOST" "deploy"
+
+      - name: Verify the forum serves
+        run: |
+          set -euo pipefail
+          # Asserted through Caddy on the public origin, not against NodeBB's own
+          # port: this proves the whole path (TLS, reverse proxy, app) rather than
+          # only that a process is listening.
+          #
+          # `--resolve` pins the name to this host because forum.imrnes.team is a
+          # DNS record this workflow does not manage; without pinning, the check
+          # could be answered by whatever that name currently points at.
+          for path in / /api/config; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 25 \
+                     --resolve "forum.imrnes.team:443:$VPS_HOST" \
+                     "https://forum.imrnes.team$path")
+            echo "GET $path -> $code"
+            [ "$code" = "200" ] || { echo "::error::$path returned $code"; exit 1; }
+          done
+
+      - name: Report the DNS state
+        # Reported, never enforced. A public name pointing at a decommissioned
+        # host is a DNS problem, and failing the deploy for it would mean a green
+        # build could never ship until someone else changed a record.
+        run: |
+          resolved=$(dig +short forum.imrnes.team @1.1.1.1 | tail -1)
+          echo "forum.imrnes.team resolves to: ${resolved:-nothing}"
+          if [ "$resolved" != "$VPS_HOST" ]; then
+            echo "::warning::forum.imrnes.team does not point at $VPS_HOST yet (currently ${resolved:-nothing}) - the origin serves, the public name does not"
+          fi
+
+      - name: Clean up the key
+        if: always()
+        run: rm -f "${{ runner.temp }}/deploy_key"
