@@ -353,21 +353,23 @@ async function listen() {
 		}
 	}
 
-	server.listen(...args, (err) => {
-		if (err) {
-			const onText = `${isSocket ? socketPath : `${bind_address}:${port}`}`;
-			winston.error(`[startup] NodeBB was unable to listen on: ${chalk.yellow(onText)}`);
-			reject(err);
-			return;
-		}
+	return new Promise((resolve, reject) => {
+		server.listen(...args, (err) => {
+			if (err) {
+				const onText = `${isSocket ? socketPath : `${bind_address}:${port}`}`;
+				winston.error(`[startup] NodeBB was unable to listen on: ${chalk.yellow(onText)}`);
+				reject(err);
+				return;
+			}
 
-		const onText = `${isSocket ? socketPath : `${bind_address}:${port}`}`;
-		winston.info(`📡 NodeBB is now listening on: ${chalk.yellow(onText)}`);
-		winston.info(`🔗 Canonical URL: ${chalk.yellow(nconf.get('url'))}`);
-		if (oldUmask) {
-			process.umask(oldUmask);
-		}
-		resolve();
+			const onText = `${isSocket ? socketPath : `${bind_address}:${port}`}`;
+			winston.info(`📡 NodeBB is now listening on: ${chalk.yellow(onText)}`);
+			winston.info(`🔗 Canonical URL: ${chalk.yellow(nconf.get('url'))}`);
+			if (oldUmask) {
+				process.umask(oldUmask);
+			}
+			resolve();
+		});
 	});
 }
 
