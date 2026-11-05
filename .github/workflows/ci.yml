@@ -77,8 +77,8 @@ jobs:
       - name: Fetch both plugin repositories
         run: |
           set -euo pipefail
-          git clone --depth 1 -q https://github.com/MythEclipse/nodebb-plugin-imrnes-ranks.git /tmp/ranks
-          git clone --depth 1 -q https://github.com/MythEclipse/nodebb-plugin-bridge-upload.git /tmp/upload
+          git clone --depth 1 -q https://github.com/IMRNES/nodebb-plugin-imrnes-ranks.git /tmp/ranks
+          git clone --depth 1 -q https://github.com/IMRNES/nodebb-plugin-bridge-upload.git /tmp/upload
 
       - name: They declare the hooks the forum needs
         run: |
