@@ -82,24 +82,12 @@ jobs:
         run: |
           set -euo pipefail
           # The deploy script already failed the run if NodeBB is not answering on
-          # loopback, so what is left to prove is the public path: TLS, the reverse
-          # proxy, and the app together.
+          # loopback, so what is left to prove is the public path: DNS, TLS, the
+          # reverse proxy and the app together.
           #
-          # That path can only be proven once DNS for forum.imrnes.team points at
-          # this host, because Caddy issues the certificate over ACME against the
-          # public name. While the record still points at a decommissioned host the
-          # handshake cannot complete, and asserting it would fail every deploy for
-          # a record this workflow does not own. So: assert when the name is ours,
-          # report when it is not, and never pass silently either way.
-          resolved=$(dig +short forum.imrnes.team @1.1.1.1 | tail -1)
-          echo "forum.imrnes.team resolves to: ${resolved:-nothing}"
-
-          if [ "$resolved" != "$VPS_HOST" ]; then
-            echo "::warning::forum.imrnes.team does not point at $VPS_HOST yet (currently ${resolved:-nothing})"
-            echo "::warning::skipping the public HTTPS check - the origin was verified on loopback by the deploy script"
-            exit 0
-          fi
-
+          # No `--resolve` pinning. It was needed while forum.imrnes.team still
+          # pointed at a decommissioned host and Caddy had no certificate for it;
+          # now that the record is here, an unpinned request is the stronger check.
           for path in / /api/config; do
             code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 25 \
                      "https://forum.imrnes.team$path")
@@ -107,17 +95,15 @@ jobs:
             [ "$code" = "200" ] || { echo "::error::$path returned $code"; exit 1; }
           done
 
-      - name: Report the DNS state
-        # Kept separate so the DNS line is visible even when the check above was
-        # skipped, and so a future reader can see the record is still the old one
-        # without reading a green run as "the forum is publicly reachable".
+      - name: Verify the DNS still points here
+        # A gate, not a warning. The record was moved here deliberately; if it drifts
+        # back to another host the forum is running somewhere nobody reaches.
         run: |
+          set -euo pipefail
           resolved=$(dig +short forum.imrnes.team @1.1.1.1 | tail -1)
-          if [ "$resolved" = "$VPS_HOST" ]; then
-            echo "forum.imrnes.team points at the origin"
-          else
-            echo "::warning::forum.imrnes.team still resolves to ${resolved:-nothing}, not $VPS_HOST"
-          fi
+          echo "forum.imrnes.team resolves to: ${resolved:-nothing}"
+          [ "$resolved" = "$VPS_HOST" ] \
+            || { echo "::error::forum.imrnes.team points at ${resolved:-nothing}, not $VPS_HOST"; exit 1; }
 
       - name: Clean up the key
         if: always()
