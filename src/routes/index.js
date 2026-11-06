@@ -1,3 +1,8 @@
+/**
+ * Main router module that sets up all application routes
+ * @module routes/index
+ */
+
 'use strict';
 
 const nconf = require('nconf');
@@ -17,6 +22,7 @@ const utils = require('../utils');
 
 const { setupPageRoute } = helpers;
 
+// Route mount configuration
 const _mounts = {
 	user: require('./user'),
 	meta: require('./meta'),
@@ -78,6 +84,7 @@ _mounts.tags = (app, name, middleware, controllers) => {
 	setupPageRoute(app, `/${name}/:tag`, [middleware.privateTagListing], controllers.tags.getTag);
 	setupPageRoute(app, `/${name}`, [middleware.privateTagListing], controllers.tags.getTags);
 };
+
 _mounts.categories = (app, name, middleware, controllers) => {
 	setupPageRoute(app, '/categories', [], controllers.categories.list);
 	setupPageRoute(app, '/popular', [], controllers.popular.get);
@@ -105,13 +112,19 @@ _mounts.groups = (app, name, middleware, controllers) => {
 	setupPageRoute(app, `/${name}/:slug/members`, middlewares, controllers.groups.members);
 };
 
+/**
+ * Main router setup function
+ * @param {express.Application} app - Express application instance
+ * @param {Object} middleware - Express middleware functions
+ * @returns {Promise<void>}
+ */
 module.exports = async function (app, middleware) {
 	const router = express.Router();
 	router.render = function (...args) {
 		app.render(...args);
 	};
 
-	// Allow plugins/themes to mount some routes elsewhere
+	// Allow plugins/themes to remount routes
 	const remountable = ['admin', 'categories', 'category', 'topic', 'post', 'users', 'user', 'groups', 'tags'];
 	const { mounts } = await plugins.hooks.fire('filter:router.add', {
 		mounts: remountable.reduce((memo, mount) => {
@@ -119,7 +132,8 @@ module.exports = async function (app, middleware) {
 			return memo;
 		}, {}),
 	});
-	// Guard against plugins sending back missing/extra mounts
+
+	// Validate and normalize mount points returned by plugins
 	for (const mount of Object.keys(mounts)) {
 		if (!remountable.includes(mount)) {
 			delete mounts[mount];
@@ -127,22 +141,25 @@ module.exports = async function (app, middleware) {
 			mounts[mount] = mount;
 		}
 	}
+
+	// Ensure all remountable routes have a mount point
 	for (const mount of remountable) {
 		if (!Object.prototype.hasOwnProperty.call(mounts, mount)) {
 			mounts[mount] = mount;
 		}
 	}
 
+	// Prepare API routes
 	router.all(/^\/+api(?:\/.*)?$/, middleware.prepareAPI);
 
-	// handle custom homepage routes
+	// Handle custom homepage routes
 	router.use('/', controllers.home.rewrite);
 
 	addAdminRoutePrivChecks(router, middleware, mounts);
 
 	app.use(middleware.stripLeadingSlashes);
 
-	// homepage handled by `action:homepage.get:[route]`
+	// Homepage handled by `action:homepage.get:[route]`
 	setupPageRoute(router, '/', [], controllers.home.pluginHook);
 
 	await plugins.reloadRoutes({ router: router });
@@ -153,7 +170,19 @@ module.exports = async function (app, middleware) {
 	winston.info('[router] Routes added');
 };
 
+/**
+ * Adds admin route privilege checks
+ * @param {express.Router} router - Express router instance
+ * @param {Object} middleware - Express middleware functions
+ * @param {Object} mounts - Route mount configuration
+ */
 function addAdminRoutePrivChecks(router, middleware, mounts) {
+	/**
+	 * Generates regex patterns for admin route matching
+	 * @param {string} prefix - The URL prefix (e.g., 'api/admin')
+	 * @param {string} mount - The mounted route name
+	 * @returns {RegExp} Regular expression for route matching
+	 */
 	function getAdminRouteRegex(prefix, mount) {
 		const paths = [`/+${prefix}`, `/+${prefix}/.*`];
 
@@ -165,21 +194,31 @@ function addAdminRoutePrivChecks(router, middleware, mounts) {
 		return new RegExp(`^(?:${paths.join('|')})$`);
 	}
 
+	const apiAdminRegex = getAdminRouteRegex('api/admin', mounts.admin);
+	const adminRegex = getAdminRouteRegex('admin', mounts.admin);
+
 	router.all(
-		getAdminRouteRegex('api/admin', mounts.admin),
+		apiAdminRegex,
 		middleware.authenticateRequest,
 		middleware.ensureLoggedIn,
 		middleware.admin.checkPrivileges
 	);
 
 	router.all(
-		getAdminRouteRegex('admin', mounts.admin),
+		adminRegex,
 		middleware.ensureLoggedIn,
 		middleware.applyCSRF,
 		middleware.admin.checkPrivileges
 	);
 }
 
+/**
+ * Adds core application routes
+ * @param {express.Application} app - Express application instance
+ * @param {express.Router} router - Express router instance
+ * @param {Object} middleware - Express middleware functions
+ * @param {Object} mounts - Route mount configuration
+ */
 function addCoreRoutes(app, router, middleware, mounts) {
 	_mounts.meta(router, middleware, controllers);
 	_mounts.api(router, middleware, controllers);
@@ -218,9 +257,11 @@ function addCoreRoutes(app, router, middleware, mounts) {
 	statics.forEach((obj) => {
 		app.use(relativePath + obj.route, express.static(obj.path, staticOptions));
 	});
+
 	app.use(`${relativePath}/uploads`, (req, res) => {
 		res.redirect(`${relativePath}/assets/uploads${req.path}?${meta.config['cache-buster']}`);
 	});
+
 	app.use(`${relativePath}/plugins`, (req, res) => {
 		res.redirect(`${relativePath}/assets/plugins${req.path}${req._parsedUrl.search || ''}`);
 	});
@@ -233,17 +274,23 @@ function addCoreRoutes(app, router, middleware, mounts) {
 	app.use(controllers.errors.handleErrors);
 }
 
+/**
+ * Adds remountable routes and handles redirects for renamed routes
+ * @param {express.Application} app - Express application instance
+ * @param {express.Router} router - Express router instance
+ * @param {Object} middleware - Express middleware functions
+ * @param {Object} mounts - Route mount configuration
+ */
 function addRemountableRoutes(app, router, middleware, mounts) {
 	for (const original of Object.keys(mounts)) {
 		const mount = mounts[original];
 
-		if (!mount) { // do not mount at all
+		if (!mount) {
 			winston.warn(`[router] Not mounting /${original}`);
 			continue;
 		}
 
 		if (mount !== original) {
-			// Set up redirect for fallback handling (some js/tpls may still refer to the traditional mount point)
 			winston.info(`[router] /${original} prefix re-mounted to /${mount}. Requests to /${original}/* will now redirect to /${mount}`);
 			router.use(new RegExp(`/(api/)?${original}`), (req, res) => {
 				controllerHelpers.redirect(res, `${nconf.get('relative_path')}/${mount}${req.path}`);

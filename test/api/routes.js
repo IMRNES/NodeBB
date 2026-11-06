@@ -1,3 +1,9 @@
+/**
+ * @fileoverview Tests to verify that all mounted routes have corresponding
+ * OpenAPI schema definitions.
+ * @see {@link https://github.com/NodeBB/NodeBB/issues/11761}
+ */
+
 'use strict';
 
 const assert = require('assert');
@@ -11,6 +17,16 @@ const db = require('../mocks/databasemock');
 let readApi;
 let writeApi;
 
+const EXCLUSION_PREFIXES = [
+	'/api/admin/plugins', '/api/compose', '/debug',
+	'/api/user/{userslug}/theme', // from persona
+];
+
+/**
+ * Parses and dereferences an OpenAPI specification file
+ * @param {string} filePath - Path to the OpenAPI YAML file
+ * @returns {Promise<Object>} Dereferenced OpenAPI specification
+ */
 async function parseApi(filePath) {
 	const window = global.window;
 	try {
@@ -19,6 +35,38 @@ async function parseApi(filePath) {
 	} finally {
 		global.window = window;
 	}
+}
+
+/**
+ * Extracts all route paths from an Express router's internal structure
+ * @param {Array} stack - Express router stack
+ * @param {string} prefix - Current path prefix
+ * @returns {Array} Array of route objects with method and path
+ */
+function buildPaths(stack, prefix) {
+	const effectivePrefix = prefix === nconf.get('relative_path') ? '' : prefix;
+
+	const paths = stack.map((route) => {
+		if (route.route && route.route.path && typeof route.route.path === 'string') {
+			// Only include API routes if no effective prefix
+			if (!effectivePrefix && !route.route.path.startsWith('/api/')) {
+				return null;
+			}
+
+			return {
+				method: Object.keys(route.route.methods)[0],
+				path: (effectivePrefix || '') + route.route.path,
+			};
+		} else if (route.name === 'router') {
+			const prefix = route.regexp.toString().replace('/^', '').replace('\\/?(?=\\/|$)/i', '').replace(/\\\//g, '/');
+			return buildPaths(route.handle.stack, prefix);
+		}
+
+		// Filter out non-route middleware and error handlers
+		return null;
+	});
+
+	return _.flatten(paths);
 }
 
 describe('routes', function () {
@@ -31,42 +79,17 @@ describe('routes', function () {
 
 	it('should grab all mounted routes and ensure a schema exists', async function () {
 		const webserver = require('../../src/webserver');
-		const buildPaths = function (stack, prefix) {
-			const effectivePrefix = prefix === nconf.get('relative_path') ? '' : prefix;
-			const paths = stack.map((dispatch) => {
-				if (dispatch.route && dispatch.route.path && typeof dispatch.route.path === 'string') {
-					if (!effectivePrefix && !dispatch.route.path.startsWith('/api/')) {
-						return null;
-					}
-
-					return {
-						method: Object.keys(dispatch.route.methods)[0],
-						path: (effectivePrefix || '') + dispatch.route.path,
-					};
-				} else if (dispatch.name === 'router') {
-					const prefix = dispatch.regexp.toString().replace('/^', '').replace('\\/?(?=\\/|$)/i', '').replace(/\\\//g, '/');
-					return buildPaths(dispatch.handle.stack, prefix);
-				}
-
-				// Drop any that aren't actual routes (middlewares, error handlers, etc.)
-				return null;
-			});
-
-			return _.flatten(paths);
-		};
 
 		let paths = buildPaths(webserver.app._router.stack).filter(Boolean).map((pathObj) => {
 			pathObj.path = pathObj.path.replace(/\/:([^\\/]+)/g, '/{$1}');
 			return pathObj;
 		});
-		const exclusionPrefixes = [
-			'/api/admin/plugins', '/api/compose', '/debug',
-			'/api/user/{userslug}/theme', // from persona
-		];
-		paths = paths.filter(path => path.method !== '_all' && !exclusionPrefixes.some(prefix => path.path.startsWith(prefix)));
 
+		paths = paths.filter(pathObj =>
+			pathObj.method !== '_all' &&
+			!EXCLUSION_PREFIXES.some(prefix => pathObj.path.startsWith(prefix))
+		);
 
-		// For each express path, query for existence in read and write api schemas
 		paths.forEach((pathObj) => {
 			describe(`${pathObj.method.toUpperCase()} ${pathObj.path}`, function () {
 				it('should be defined in schema docs', function () {
@@ -76,7 +99,7 @@ describe('routes', function () {
 						pathObj.path = pathObj.path.replace('/api/v3', '');
 					}
 
-					// Don't check non-GET routes in Read API
+					// Skip non-GET routes in Read API
 					if (schema === readApi && pathObj.method !== 'get') {
 						return;
 					}
