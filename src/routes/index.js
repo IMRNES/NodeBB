@@ -120,18 +120,18 @@ module.exports = async function (app, middleware) {
 		}, {}),
 	});
 	// Guard against plugins sending back missing/extra mounts
-	Object.keys(mounts).forEach((mount) => {
+	for (const mount of Object.keys(mounts)) {
 		if (!remountable.includes(mount)) {
 			delete mounts[mount];
-		} else if (typeof mount !== 'string') {
+		} else if (typeof mounts[mount] !== 'string') {
 			mounts[mount] = mount;
 		}
-	});
-	remountable.forEach((mount) => {
-		if (!mounts.hasOwnProperty(mount)) {
+	}
+	for (const mount of remountable) {
+		if (!Object.prototype.hasOwnProperty.call(mounts, mount)) {
 			mounts[mount] = mount;
 		}
-	});
+	}
 
 	router.all(/^\/+api(?:\/.*)?$/, middleware.prepareAPI);
 
@@ -234,13 +234,12 @@ function addCoreRoutes(app, router, middleware, mounts) {
 }
 
 function addRemountableRoutes(app, router, middleware, mounts) {
-	Object.keys(mounts).map(async (mount) => {
-		const original = mount;
-		mount = mounts[original];
+	for (const original of Object.keys(mounts)) {
+		const mount = mounts[original];
 
 		if (!mount) { // do not mount at all
 			winston.warn(`[router] Not mounting /${original}`);
-			return;
+			continue;
 		}
 
 		if (mount !== original) {
@@ -252,5 +251,5 @@ function addRemountableRoutes(app, router, middleware, mounts) {
 		}
 
 		_mounts[original](router, mount, middleware, controllers);
-	});
+	}
 }
