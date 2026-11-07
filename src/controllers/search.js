@@ -1,4 +1,3 @@
-
 'use strict';
 
 const _ = require('lodash');
@@ -15,25 +14,41 @@ const privileges = require('../privileges');
 const tx = require('../translator');
 const helpers = require('./helpers');
 
+/**
+ * Valid search parameters with their allowed values
+ * @type {Object}
+ */
+const VALIDATION_SCHEMA = {
+	in: ['titles', 'titlesposts', 'posts', 'users', 'categories', 'tags', 'bookmarks'],
+	matchWords: ['all', 'any'],
+	repliesFilter: ['atmost', 'atleast'],
+	replies: 'number',
+	timeFilter: ['newer', 'older'],
+	timeRange: 'number',
+	sortBy: ['relevance', 'timestamp', 'votes', 'topic.lastposttime', 'topic.title', 'topic.postcount', 'topic.viewcount', 'topic.votes', 'topic.timestamp', 'user.username', 'category.name'],
+	sortDirection: ['asc', 'desc'],
+};
+
 const searchController = module.exports;
 
 searchController.search = async function (req, res, next) {
 	if (!plugins.hooks.hasListeners('filter:search.query')) {
 		return next();
 	}
-	const page = Math.max(1, parseInt(req.query.page, 10)) || 1;
 
+	const page = Math.max(1, parseInt(req.query.page, 10)) || 1;
 	const searchOnly = parseInt(req.query.searchOnly, 10) === 1;
 	const searchQuery = { ...req.query };
+
 	const [canSearchUsers, canSearchContent, canSearchTags] = await privileges.global.can([
 		'search:users', 'search:content', 'search:tags',
 	], req.uid);
 
 	const searchIn = searchQuery.in || meta.config.searchDefaultIn || 'titlesposts';
 	let allowed = (searchIn === 'users' && canSearchUsers) ||
-					(searchIn === 'tags' && canSearchTags) ||
-					(searchIn === 'categories') ||
-					(['titles', 'titlesposts', 'posts', 'bookmarks'].includes(searchIn) && canSearchContent);
+		(searchIn === 'tags' && canSearchTags) ||
+		(searchIn === 'categories') ||
+		(['titles', 'titlesposts', 'posts', 'bookmarks'].includes(searchIn) && canSearchContent);
 	({ allowed } = await plugins.hooks.fire('filter:search.isAllowed', {
 		uid: req.uid,
 		query: searchQuery,
@@ -43,24 +58,11 @@ searchController.search = async function (req, res, next) {
 		return helpers.notAllowed(req, res);
 	}
 
-	if (searchQuery.categories && !Array.isArray(searchQuery.categories)) {
-		searchQuery.categories = [searchQuery.categories];
-	}
-	if (searchQuery.hasTags && !Array.isArray(searchQuery.hasTags)) {
-		searchQuery.hasTags = [searchQuery.hasTags];
-	}
+	// Normalize array parameters
+	searchQuery.categories = normalizeToArray(searchQuery.categories);
+	searchQuery.hasTags = normalizeToArray(searchQuery.hasTags);
 
-	const validation = {
-		in: ['titles', 'titlesposts', 'posts', 'users', 'categories', 'tags', 'bookmarks'],
-		matchWords: ['all', 'any'],
-		repliesFilter: ['atmost', 'atleast'],
-		replies: 'number',
-		timeFilter: ['newer', 'older'],
-		timeRange: 'number',
-		sortBy: ['relevance', 'timestamp', 'votes', 'topic.lastposttime', 'topic.title', 'topic.postcount', 'topic.viewcount', 'topic.votes', 'topic.timestamp', 'user.username', 'category.name'],
-		sortDirection: ['asc', 'desc'],
-	};
-	const validParams = helpers.validateParameters(req.query, Object.keys(validation), validation);
+	const validParams = helpers.validateParameters(req.query, Object.keys(VALIDATION_SCHEMA), VALIDATION_SCHEMA);
 	const data = {
 		query: searchQuery.term,
 		searchIn: validParams.in || 'titlesposts',
@@ -88,7 +90,7 @@ searchController.search = async function (req, res, next) {
 
 	searchData.pagination = pagination.create(page, searchData.pageCount, searchQuery);
 	searchData.multiplePages = searchData.pageCount > 1;
-	searchData.search_query = String(searchQuery.term || '');
+	searchData.search_query = String(searchQuery.term ?? '');
 	searchData.term = searchQuery.term;
 
 	if (searchOnly) {
@@ -99,12 +101,14 @@ searchController.search = async function (req, res, next) {
 	searchData.showAsPosts = !searchQuery.showAs || searchQuery.showAs === 'posts';
 	searchData.showAsTopics = searchQuery.showAs === 'topics';
 	searchData.title = '[[global:header.search]]';
+
 	if (Array.isArray(data.categories)) {
 		searchData.selectedCids = data.categories.map(cid => String(cid));
 		if (!searchData.selectedCids.includes('all') && searchData.selectedCids.length) {
 			searchData.selectedCategory = { cid: 0 };
 		}
 	}
+
 	const userFilter = await getSelectedUsers(data.postedBy);
 	searchData.userFilterSelected = userFilter;
 
@@ -125,16 +129,14 @@ searchController.search = async function (req, res, next) {
 			active: !!userFilter.length,
 			label: tx.compile(
 				'search:posted-by-usernames',
-				(Array.isArray(userFilter) ? userFilter : [])
-					.map(u => tx.escape(String(u.username))).join(', ')
+				userFilter.map(u => tx.escape(String(u.username))).join(', ')
 			),
 		},
 		tags: {
 			active: !!(Array.isArray(data.hasTags) && data.hasTags.length),
 			label: tx.compile(
 				'search:tags-x',
-				(Array.isArray(data.hasTags) ? data.hasTags : [])
-					.map(u => tx.escape(String(u))).join(', ')
+				data.hasTags.map(t => tx.escape(String(t))).join(', ')
 			),
 		},
 		categories: {
@@ -143,7 +145,6 @@ searchController.search = async function (req, res, next) {
 			label: await buildSelectedCategoryLabel(searchData.selectedCids),
 		},
 	};
-
 
 	searchData.tagFilterSelected = getSelectedTags(data.hasTags);
 	searchData.searchDefaultSortBy = meta.config.searchDefaultSortBy || '';
@@ -157,57 +158,97 @@ searchController.search = async function (req, res, next) {
 	res.render('search', searchData);
 };
 
-const searches = {};
-
+/**
+ * Stores searches in a per-user buffer to batch insert into database
+ * @param {Object} data - Search data containing query and user info
+ * @returns {Promise<void>}
+ */
 async function recordSearch(data) {
 	const { query, searchIn } = data;
 	if (!query || parseInt(data.qs.composer, 10) === 1) {
 		return;
 	}
+
 	const cleanedQuery = String(query).trim().toLowerCase().slice(0, 255);
-	if (['titles', 'titlesposts', 'posts'].includes(searchIn) && cleanedQuery.length > 2) {
-		searches[data.uid] = searches[data.uid] || { timeoutId: 0, queries: [] };
-		searches[data.uid].queries.push(cleanedQuery);
-		if (searches[data.uid].timeoutId) {
-			clearTimeout(searches[data.uid].timeoutId);
-		}
-		searches[data.uid].timeoutId = setTimeout(async () => {
-			if (searches[data.uid] && searches[data.uid].queries) {
-				const copy = searches[data.uid].queries.slice();
-				const filtered = searches[data.uid].queries.filter(
-					q => !copy.find(query => query.startsWith(q) && query.length > q.length)
-				);
-				delete searches[data.uid];
-				const dayTimestamp = (new Date());
-				dayTimestamp.setHours(0, 0, 0, 0);
-				await Promise.all(_.uniq(filtered).map(async (query) => {
-					await db.sortedSetIncrBy('searches:all', 1, query);
-					await db.sortedSetIncrBy(`searches:${dayTimestamp.getTime()}`, 1, query);
-				}));
-			}
-		}, 5000);
+	if (!['titles', 'titlesposts', 'posts'].includes(searchIn) || cleanedQuery.length <= 2) {
+		return;
 	}
+
+	searches[data.uid] = searches[data.uid] || { timeoutId: 0, queries: [] };
+	searches[data.uid].queries.push(cleanedQuery);
+
+	if (searches[data.uid].timeoutId) {
+		clearTimeout(searches[data.uid].timeoutId);
+	}
+
+	searches[data.uid].timeoutId = setTimeout(async () => {
+		if (!searches[data.uid] || !searches[data.uid].queries) {
+			return;
+		}
+
+		const currentQueries = searches[data.uid].queries;
+		const filtered = currentQueries.filter(
+			q => !currentQueries.some(other => other.startsWith(q) && other.length > q.length)
+		);
+
+		delete searches[data.uid];
+
+		const dayTimestamp = new Date();
+		dayTimestamp.setHours(0, 0, 0, 0);
+
+		await Promise.all(_.uniq(filtered).map(async (query) => {
+			await db.sortedSetIncrBy('searches:all', 1, query);
+			await db.sortedSetIncrBy(`searches:${dayTimestamp.getTime()}`, 1, query);
+		}));
+	}, 5000);
 }
 
+/**
+ * Normalizes a value to an array if it is not already an array
+ * @param {*} value - Value to normalize
+ * @returns {Array} - Array version of the value, or empty array if null/undefined
+ */
+function normalizeToArray(value) {
+	return Array.isArray(value) ? value : (value != null ? [value] : []);
+}
+
+/**
+ * Gets user data for postedBy filter
+ * @param {Array} postedBy - Array of usernames
+ * @returns {Promise<Array>} - Array of user objects with username, userslug, picture
+ */
 async function getSelectedUsers(postedBy) {
 	if (!Array.isArray(postedBy) || !postedBy.length) {
 		return [];
 	}
+
 	const uids = await user.getUidsByUsernames(postedBy);
 	const userData = await user.getUsersFields(uids, ['username', 'userslug', 'picture']);
 	return userData.filter(u => u && u.userslug);
 }
 
+/**
+ * Gets tag data for hasTags filter
+ * @param {Array} hasTags - Array of tag names
+ * @returns {Promise<Array>} - Promise resolving to tag data
+ */
 function getSelectedTags(hasTags) {
 	if (!Array.isArray(hasTags) || !hasTags.length) {
 		return [];
 	}
+
 	const tags = hasTags.map(tag => ({ value: tag }));
 	return topics.getTagData(tags);
 }
 
+/**
+ * Builds label for selected categories in search filters
+ * @param {Array} selectedCids - Array of category IDs
+ * @returns {Promise<string>} - Translated label for categories
+ */
 async function buildSelectedCategoryLabel(selectedCids) {
 	let label = '[[search:categories]]';
+
 	if (Array.isArray(selectedCids)) {
 		if (selectedCids.length > 1) {
 			label = `[[search:categories-x, ${selectedCids.length}]]`;
@@ -220,5 +261,12 @@ async function buildSelectedCategoryLabel(selectedCids) {
 			}
 		}
 	}
+
 	return label;
 }
+
+/**
+ * In-memory storage for user search queries (batched for DB insertion)
+ * @type {Object}
+ */
+const searches = {};
