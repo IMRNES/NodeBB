@@ -23,7 +23,7 @@ const helpers = module.exports;
 helpers.meetsMinReputation = function (userData, setting) {
 	return !userData.isSelf ||
 		userData.isAdminOrGlobalModerator ||
-		!!meta.config['reputation:disabled'] ||
+		meta.config['reputation:disabled'] ||
 		userData.reputation >= meta.config[setting];
 };
 
@@ -153,7 +153,7 @@ helpers.getCustomUserFields = async function (callerUID, userData) {
 					key: slugify(name),
 					name,
 					value,
-					linkValue: value.replace('http://', '').replace('https://', ''),
+					linkValue: value.replace(/^https?:\/\//, ''),
 					type: isUrl ? 'input-link' : 'input-text',
 					'min-rep': '',
 					icon: 'fa-solid fa-circle-info',
@@ -182,7 +182,7 @@ helpers.getCustomUserFields = async function (callerUID, userData) {
 		}
 		if (f.type === 'input-link' && userValue) {
 			userValue = utils.isSafeHref(userValue) ? userValue : '';
-			f.linkValue = String(userValue.replace('http://', '').replace('https://', ''));
+			f.linkValue = String(userValue.replace(/^https?:\/\//, ''));
 		}
 		f['select-options'] = user.customFields.getOptions(f);
 		if (f.type === 'select') {

@@ -34,7 +34,8 @@ CustomFields.setFields = async function (fields) {
 };
 
 CustomFields.getOptions = function (field) {
-	return (field['select-options'] || '').split('\n').filter(Boolean);
+	const options = field && field['select-options'];
+	return options ? String(options).split('\n').filter(Boolean) : [];
 };
 
 CustomFields.parseValue = function (field, value) {
@@ -42,13 +43,12 @@ CustomFields.parseValue = function (field, value) {
 		return value;
 	}
 
-	let values;
 	try {
-		values = JSON.parse(value || '[]');
-	} catch (err) {
+		const values = JSON.parse(String(value || '[]'));
+		return Array.isArray(values) ? values : null;
+	} catch {
 		return null;
 	}
-	return Array.isArray(values) ? values : null;
 };
 
 CustomFields.validate = function (field, value) {
@@ -66,36 +66,28 @@ CustomFields.validate = function (field, value) {
 		require_tld: true,
 	});
 
+	const throwValidationError = (key, ...args) => {
+		throw new Error(tx.compile(`error:${key}`, field.name, ...args));
+	};
+
 	if (value && type === 'input-number' && !utils.isNumber(value)) {
-		throw new Error(tx.compile(
-			'error:custom-user-field-invalid-number', field.name
-		));
+		throwValidationError('custom-user-field-invalid-number');
 	} else if (value && type === 'input-text' && isUrl) {
-		throw new Error(tx.compile(
-			'error:custom-user-field-invalid-text', field.name
-		));
+		throwValidationError('custom-user-field-invalid-text');
 	} else if (value && type === 'input-date' && !validator.isDate(value)) {
-		throw new Error(tx.compile(
-			'error:custom-user-field-invalid-date', field.name
-		));
+		throwValidationError('custom-user-field-invalid-date');
 	} else if (value && type === 'input-link' && !isUrl) {
-		throw new Error(tx.compile(
-			'error:custom-user-field-invalid-link', field.name
-		));
+		throwValidationError('custom-user-field-invalid-link');
 	} else if (type === 'select') {
 		const opts = CustomFields.getOptions(field);
 		if (!opts.includes(value) && value !== '') {
-			throw new Error(tx.compile(
-				'error:custom-user-field-select-value-invalid', field.name
-			));
+			throwValidationError('custom-user-field-select-value-invalid');
 		}
 	} else if (type === 'select-multi') {
 		const opts = CustomFields.getOptions(field);
 		const values = CustomFields.parseValue(field, value);
-		if (!values || !values.every(value => opts.includes(value))) {
-			throw new Error(tx.compile(
-				'error:custom-user-field-select-value-invalid', field.name
-			));
+		if (!values || !values.every(v => opts.includes(v))) {
+			throwValidationError('custom-user-field-select-value-invalid');
 		}
 	}
 };

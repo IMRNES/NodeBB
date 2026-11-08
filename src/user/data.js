@@ -224,10 +224,8 @@ module.exports = function (User) {
 	};
 
 	User.hidePrivateData = async function (users, callerUID) {
-		let single = false;
 		if (!Array.isArray(users)) {
 			users = [users];
-			single = true;
 		}
 
 		const [userSettings, isAdmin, isGlobalModerator, isModOfAny, customFields] = await Promise.all([
@@ -238,23 +236,19 @@ module.exports = function (User) {
 			User.customFields.getFields(),
 		]);
 
-		users = users.map((userData, idx) => {
-			const _userData = { ...userData };
+		return users.map((userData, idx) => {
+			const isSelf = String(callerUID) === String(userData.uid);
+			const privileged = isAdmin || isGlobalModerator;
 
-			const isSelf = String(callerUID) === String(_userData.uid);
-			const privilegedOrSelf = isAdmin || isGlobalModerator || isSelf;
-
-			if (!privilegedOrSelf && !userSettings[idx].showemail) {
-				_userData.email = '';
+			if (!privileged && !isSelf && !userSettings[idx].showemail) {
+				userData.email = '';
 			}
-			if (!privilegedOrSelf && !userSettings[idx].showfullname) {
-				_userData.fullname = '';
+			if (!privileged && !isSelf && !userSettings[idx].showfullname) {
+				userData.fullname = '';
 			}
-			User.customFields.hideCustomFields(callerUID, _userData, isAdmin || isModOfAny, customFields);
-			return _userData;
+			User.customFields.hideCustomFields(callerUID, userData, privileged || isModOfAny, customFields);
+			return userData;
 		});
-
-		return single ? users.pop() : users;
 	};
 
 	async function modifyUserData(users, requestedFields, fieldsToRemove) {
@@ -268,6 +262,7 @@ module.exports = function (User) {
 
 		const unbanUids = [];
 		const unmuteUids = [];
+
 		users.forEach((user) => {
 			if (!user) {
 				return;
@@ -297,15 +292,15 @@ module.exports = function (User) {
 			}
 
 			if (!user.uid && !activitypub.helpers.isUri(user.uid)) {
-				for (const [key, value] of Object.entries(User.guestData)) {
-					user[key] = value;
-				}
+				Object.assign(user, User.guestData);
 				user.picture = User.getDefaultAvatar();
 			}
 
 			if (user.hasOwnProperty('groupTitle')) {
 				parseGroupTitle(user);
 			}
+
+			// Handle uploaded picture
 			const isUsingUploadedPicture = user.picture && user.picture === user.uploadedpicture;
 			if (isUsingUploadedPicture || user.uploadedpicture) {
 				user.uploadedpicture = prependRelativePath(user.uploadedpicture);
@@ -314,6 +309,7 @@ module.exports = function (User) {
 				}
 			}
 
+			// Handle cover URL
 			if (user.hasOwnProperty('cover:url')) {
 				user['cover:url'] = user['cover:url'] ?
 					prependRelativePath(user['cover:url']) :
@@ -324,23 +320,26 @@ module.exports = function (User) {
 				user.picture = User.getDefaultAvatar();
 			}
 
+			// Parse status
 			if (user.hasOwnProperty('status') && user.hasOwnProperty('lastonline')) {
 				user.status = User.getStatus(user);
 			}
 
+			// Parse ISO date formats
 			if (user.hasOwnProperty('joindate')) {
 				user.joindateISO = utils.toISOString(user.joindate);
 			}
-
-			if (user.hasOwnProperty('lastonline') && (!requestedFields.length || requestedFields.includes('lastonline')) && !fieldsToRemove.includes('lastonline')) {
-				user.lastonlineISO = utils.toISOString(user.lastonline) || user.joindateISO;
+			if (requestedFields.length === 0 || requestedFields.includes('lastonline')) {
+				if (!fieldsToRemove.includes('lastonline') && user.hasOwnProperty('lastonline')) {
+					user.lastonlineISO = utils.toISOString(user.lastonline) || user.joindateISO;
+				}
 			}
 
+			// Handle mute status
 			if (user.hasOwnProperty('muted') && user.hasOwnProperty('mutedUntil')) {
 				const isMuted = Boolean(user.muted);
 				user.muted = Boolean(user.muted && (user.mutedUntil > Date.now() || user.mutedUntil === 0));
-				const unmute = !user.muted && isMuted && user.mutedUntil && user.mutedUntil <= Date.now();
-				if (unmute) {
+				if (!user.muted && isMuted && user.mutedUntil && user.mutedUntil <= Date.now()) {
 					unmuteUids.push(user.uid);
 				}
 				user.mutedUntil = !user.muted ? 0 : user.mutedUntil;
@@ -362,32 +361,34 @@ module.exports = function (User) {
 				user['icon:text'] = (user.username[0] || '').toUpperCase();
 			}
 
+			// Handle ban status
 			if (user.hasOwnProperty('banned') && user.hasOwnProperty('banned:expire')) {
 				const result = User.bans.calcExpiredFromUserData(user);
 				user.banned = result.banned;
-				const unban = result.banned && result.banExpired;
-				user.banned_until = unban ? 0 : user['banned:expire'];
-				user.banned_until_readable = user.banned_until && !unban ? utils.toISOString(user.banned_until) : '[[user:info.banned-permanently]]';
-				if (unban) {
+				if (result.banned && result.banExpired) {
 					unbanUids.push(user.uid);
 					user.banned = false;
 				}
+				user.banned_until = result.banned && !result.banExpired ? user['banned:expire'] : 0;
+				user.banned_until_readable = user.banned_until ?
+					utils.toISOString(user.banned_until) : '[[user:info.banned-permanently]]';
 			}
 		});
 
+		// Clean up temporary fields and validate URL fields
 		users.forEach((user) => {
-			// remove fields that were added just for processing
+			if (!user) {
+				return;
+			}
+
 			fieldsToRemove.forEach((field) => {
-				if (user) {
-					user[field] = undefined;
-				}
+				user[field] = undefined;
 			});
 
 			urlFieldList.forEach((field) => {
 				if (user[field] && typeof user[field] === 'string') {
 					const trimmedValue = user[field].trim();
-					const isValid = isValidUserUrlField(trimmedValue);
-					if (!isValid) {
+					if (!isValidUserUrlField(trimmedValue)) {
 						if (field === 'picture') {
 							user.picture = User.getDefaultAvatar();
 						} else if (field === 'cover:url') {
@@ -449,40 +450,41 @@ module.exports = function (User) {
 		);
 
 		users.forEach((user, index) => {
-			if (user) {
-				const userSetting = parseInt(userSettings[index].showfullname, 10);
-				const showfullname = utils.isNumber(user.uid) ?
-					(userSetting === 0 || userSetting === 1 ? userSetting : userAcpDefault) :
-					1; // Always show full name for remote users
-
-				user.displayname = String(
-					showfullname && user.fullname ?
-						utils.stripBidiControls(user.fullname) :
-						user.username || ''
-				);
+			if (!user) {
+				return;
 			}
+
+			const userSetting = parseInt(userSettings[index].showfullname, 10);
+			const showfullname = utils.isNumber(user.uid) ?
+				(userSetting === 0 || userSetting === 1 ? userSetting : userAcpDefault) :
+				1; // Always show full name for remote users
+
+			user.displayname = String(
+				showfullname && user.fullname ?
+					utils.stripBidiControls(user.fullname) :
+					user.username || ''
+			);
 		});
 	}
 
 	function parseGroupTitle(user) {
+		if (!user.groupTitle) {
+			user.groupTitle = '';
+			user.groupTitleArray = [];
+			return;
+		}
+
 		try {
 			user.groupTitleArray = JSON.parse(user.groupTitle);
-		} catch (err) {
-			if (user.groupTitle) {
-				user.groupTitleArray = [user.groupTitle];
-			} else {
-				user.groupTitle = '';
-				user.groupTitleArray = [];
-			}
+		} catch {
+			user.groupTitleArray = [user.groupTitle];
 		}
+
 		if (!Array.isArray(user.groupTitleArray)) {
-			if (user.groupTitleArray) {
-				user.groupTitleArray = [user.groupTitleArray];
-			} else {
-				user.groupTitleArray = [];
-			}
+			user.groupTitleArray = [user.groupTitleArray];
 		}
-		if (!meta.config.allowMultipleBadges && user.groupTitleArray.length) {
+
+		if (!meta.config.allowMultipleBadges && user.groupTitleArray.length > 1) {
 			user.groupTitleArray = [user.groupTitleArray[0]];
 		}
 	}
