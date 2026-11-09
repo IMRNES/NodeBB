@@ -231,11 +231,11 @@ authenticationController.registerAbort = async (req, res) => {
 
 		const { interstitials } = await user.interstitials.get(req, req.session.registration);
 		if (!interstitials.length) {
-			winston.info(`[register/abort] no intersitials ${JSON.stringify({ uid: req.uid, session: req.session })}`);
+			winston.info(`[register/abort] no interstitials ${JSON.stringify({ uid: req.uid, session: req.session })}`);
 			delete req.session.registration;
 			return res.redirect(nconf.get('relative_path') + (req.session.returnTo || '/'));
 		}
-		winston.info(`[register/abort] Found intersitials ${JSON.stringify({ uid: req.uid, session: req.session, interstitials })}`);
+		winston.info(`[register/abort] Found interstitials ${JSON.stringify({ uid: req.uid, session: req.session, interstitials })}`);
 	}
 	winston.info(`[register/abort] clearing session ${JSON.stringify({ uid: req.uid, session: req.session })}`);
 	// End the session and redirect to home
@@ -497,21 +497,19 @@ authenticationController.logout = async function (req, res) {
 		res.clearCookie(nconf.get('sessionKey'), meta.configs.cookie.get());
 		return res.status(200).send('not-logged-in');
 	}
-	const { uid } = req;
-	const { sessionID } = req;
 
 	try {
-		await user.auth.revokeSession(sessionID, uid);
+		await user.auth.revokeSession(req.sessionID, req.uid);
 		await logoutAsync(req);
 		await destroyAsync(req);
 		res.clearCookie(nconf.get('sessionKey'), meta.configs.cookie.get());
 
-		await user.setUserField(uid, 'lastonline', Date.now() - (meta.config.onlineCutoff * 60000));
-		await db.sortedSetAdd('users:online', Date.now() - (meta.config.onlineCutoff * 60000), uid);
-		await plugins.hooks.fire('static:user.loggedOut', { req, res, uid, sessionID });
+		await user.setUserField(req.uid, 'lastonline', Date.now() - (meta.config.onlineCutoff * 60000));
+		await db.sortedSetAdd('users:online', Date.now() - (meta.config.onlineCutoff * 60000), req.uid);
+		await plugins.hooks.fire('static:user.loggedOut', { req, res, uid: req.uid, sessionID: req.sessionID });
 
 		// Force session check for all connected socket.io clients with the same session id
-		sockets.in(`sess_${sessionID}`).emit('checkSession', 0);
+		sockets.in(`sess_${req.sessionID}`).emit('checkSession', 0);
 		const payload = {
 			next: `${nconf.get('relative_path')}/`,
 		};
@@ -520,10 +518,10 @@ authenticationController.logout = async function (req, res) {
 		if (req.body?.noscript === 'true' || res.locals.logoutRedirect === true) {
 			return res.redirect(payload.next);
 		}
-		res.status(200).send(payload);
+		return res.status(200).send(payload);
 	} catch (err) {
 		winston.error(`${req.method} ${req.originalUrl}\n${err.stack}`);
-		res.status(500).send(err.message);
+		return res.status(500).send(err.message);
 	}
 };
 

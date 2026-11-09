@@ -74,7 +74,7 @@ unreadController.get = async function (req, res) {
 	data.selectedTag = tagData.selectedTag;
 	data.selectedTags = tagData.selectedTags;
 	data.filters = helpers.buildFilters(baseUrl, filter, req.query);
-	data.selectedFilter = data.filters.find(filter => filter && filter.selected);
+	data.selectedFilter = data.filters.find(f => f && f.selected);
 	data['reputation:disabled'] = meta.config['reputation:disabled'];
 
 	res.render('unread', data);
